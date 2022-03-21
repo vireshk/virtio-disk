@@ -1,7 +1,7 @@
 #ifndef KVM__KVM_H
 #define KVM__KVM_H
 
-#include "kvm/disk-image.h"
+#include "kvm/i2c.h"
 #include "kvm/util-init.h"
 
 #include <stdbool.h>
@@ -23,15 +23,14 @@
 #endif
 
 struct kvm_config {
-	struct disk_image_params disk_image[MAX_DISK_IMAGES];
+	struct i2c_params i2c_params[MAX_I2C];
 	u8  image_count;
 	int debug_iodelay;
 };
 
 struct kvm {
 	struct kvm_config	cfg;
-	struct disk_image       **disks;
-	int                     nr_disks;
+	int                     nr;
 };
 
 static inline void kvm__set_thread_name(const char *name)

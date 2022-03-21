@@ -8,6 +8,7 @@ OBJS :=	device.o \
 
 
 OBJS	+= virtio/blk.o
+OBJS	+= virtio/i2c.o
 OBJS	+= virtio/core.o
 OBJS	+= virtio/mmio.o
 

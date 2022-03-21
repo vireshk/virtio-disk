@@ -33,9 +33,9 @@
 #include <xenctrl.h>
 #include <xendevicemodel.h>
 
-struct disk_image_params;
+struct i2c_params;
 
-int device_initialize(struct disk_image_params *disk_image, uint8_t image_count);
+int device_initialize(struct i2c_params *i2c_params, uint8_t image_count);
 void device_teardown(void);
 
 #endif  /* _DEVICE_H */

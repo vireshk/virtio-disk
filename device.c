@@ -51,26 +51,19 @@
 
 static struct kvm *kvm;
 
-int device_initialize(struct disk_image_params *disk_image, u8 image_count)
-{
-    int rc;
+int virtio_i2c__init(struct kvm *kvm);
 
+int device_initialize(struct i2c_params *i2c_params, u8 image_count)
+{
     kvm = calloc(1, sizeof(*kvm));
     if (!kvm)
         return -ENOMEM;
 
-    memcpy(kvm->cfg.disk_image, disk_image, sizeof(*disk_image) * image_count);
+    memcpy(kvm->cfg.i2c_params, i2c_params, sizeof(*i2c_params) * image_count);
     kvm->cfg.image_count = image_count;
-    kvm->nr_disks = kvm->cfg.image_count;
+    kvm->nr = kvm->cfg.image_count;
 
-    rc = init_list__init(kvm);
-    if (rc < 0) {
-        DBG ("Initialization failed\n");
-        free(kvm);
-        return rc;
-    }
-
-    return 0;
+    return virtio_i2c__init(kvm);
 }
 
 void device_teardown(void)

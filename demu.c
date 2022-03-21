@@ -66,13 +66,14 @@
 #include "device.h"
 #include "demu.h"
 #include "xs_dev.h"
-
 #include "kvm/kvm.h"
 
-#define XS_DISK_TYPE	"virtio_disk"
+#define XS_DEVICE_TYPE	"i2c"
 
-static struct disk_image_params disk_image[MAX_DISK_IMAGES];
+volatile struct i2c_params i2c_params[MAX_I2C];
 static u8 image_count;
+static pthread_t event_thread;
+static int efd, xfd;
 
 /*
  * XXX:
@@ -203,9 +204,9 @@ demu_unmap_guest_range(void *ptr, uint64_t size)
 
 #ifdef MAP_IN_ADVANCE
 #define NR_GUEST_RAM 2
-static void *host_addr[NR_GUEST_RAM];
+void *host_addr[NR_GUEST_RAM];
 
-static uint64_t guest_ram_base[NR_GUEST_RAM];
+uint64_t guest_ram_base[NR_GUEST_RAM];
 static uint64_t guest_ram_size[NR_GUEST_RAM];
 
 /* TODO Find a proper way to get guest ram bank info */
@@ -243,9 +244,9 @@ static int demu_init_guest_ram(void)
 
 	/* #define-s below located at include/public/arch-arm.h */
 	guest_ram_base[0] = GUEST_RAM0_BASE;
-	if (mem <= GUEST_RAM0_SIZE)
+	if (mem <= GUEST_RAM0_SIZE) {
 		guest_ram_size[0] = mem;
-	else {
+	} else {
 		guest_ram_size[0] = GUEST_RAM0_SIZE;
 		guest_ram_base[1] = GUEST_RAM1_BASE;
 		guest_ram_size[1] = mem - GUEST_RAM0_SIZE;
@@ -520,10 +521,8 @@ demu_seq_next(void)
         DBG("devid = %u\n", demu_state.xs_dev->devid);
 
         for (i = 0; i < image_count; i++) {
-            DBG("filename[%d] = %s\n", i, disk_image[i].filename);
-            DBG("readonly[%d] = %d\n", i, disk_image[i].readonly);
-            DBG("base[%d]     = 0x%x\n", i, disk_image[i].addr);
-            DBG("irq[%d]      = %u\n", i, disk_image[i].irq);
+            DBG("base[%d]     = 0x%x\n", i, i2c_params[i].addr);
+            DBG("irq[%d]      = %u\n", i, i2c_params[i].irq);
         }
         break;
     }
@@ -700,16 +699,8 @@ demu_teardown(void)
     }
 
     if (demu_state.seq >= DEMU_SEQ_XENSTORE_ATTACHED) {
-        int i;
 
         DBG("<XENSTORE_ATTACHED\n");
-
-        for (i = 0; i < MAX_DISK_IMAGES; i++) {
-            if (disk_image[i].filename) {
-                free((void *)disk_image[i].filename);
-                disk_image[i].filename = NULL;
-            }
-        }
 
         xenstore_disconnect_dom(demu_state.xs_dev);
 
@@ -732,31 +723,19 @@ demu_sigterm(int num)
 
 static int demu_read_xenstore_config(void *unused)
 {
-    char *str;
     int val, ret = 0;
 
     image_count = 0;
 
-    str = xenstore_read_be_str(demu_state.xs_dev, "mode");
-    if (!str)
-        return -1;
-    disk_image[image_count].readonly = !strchr(str, 'w');
-    free(str);
-
     ret = xenstore_read_be_int(demu_state.xs_dev, "base", &val);
     if (ret < 0)
         return ret;
-    disk_image[image_count].addr = val;
+    i2c_params[image_count].addr = val;
 
     ret = xenstore_read_be_int(demu_state.xs_dev, "irq", &val);
     if (ret < 0)
         return ret;
-    disk_image[image_count].irq = val;
-
-    str = xenstore_read_be_str(demu_state.xs_dev, "params");
-    if (!str)
-        return -1;
-    disk_image[image_count].filename = str;
+    i2c_params[image_count].irq = val;
 
     image_count ++;
 
@@ -764,7 +743,7 @@ static int demu_read_xenstore_config(void *unused)
 }
 
 static int
-demu_initialize(void)
+demu_initialize()
 {
     int             rc;
     void            *addr;
@@ -869,7 +848,7 @@ demu_initialize(void)
     demu_seq_next();
 #endif
 
-    rc = device_initialize(disk_image, image_count);
+    rc = device_initialize(i2c_params, image_count);
     if (rc < 0)
         goto fail11;
 
@@ -970,55 +949,70 @@ demu_poll_iopages(void)
     }
 }
 
-int
-main(int argc, char **argv, char **envp)
+static void *handle_guest_events(void *unused)
 {
-    sigset_t        block;
-    int             rc;
-    int             efd, xfd;
-    char            *devid_str = NULL;
-    int             opt;
-    const struct option lopts[] =
-    {
-        {"help", no_argument, NULL, 'h'},
-        {"devid", optional_argument, NULL, 'd'},
-        {NULL, 0, NULL, 0},
-    };
+    int nfds;
+    fd_set fds;
+    struct timeval t = { .tv_sec = 1 };
+    int rc;
 
-    while ((opt = getopt_long(argc, argv, "hd:", lopts, NULL)) != -1) {
-        switch (opt) {
-            case 'd':
-                devid_str = optarg;
-                break;
+    while(1) {
+        FD_ZERO(&fds);
+        FD_SET(efd, &fds);
+        FD_SET(xfd, &fds);
+        nfds = __max(efd, xfd) + 1;
 
-            case 'h':
-                /* Fallthough */
-            default:
-                printf("Usage: %s [-d <devid>]\n", argv[0]);
-                return 0;
+        rc = select(nfds, &fds, NULL, NULL, &t);
+        if (rc > 0) {
+            if (FD_ISSET(efd, &fds))
+                demu_poll_iopages();
+
+            if (FD_ISSET(xfd, &fds)) {
+                rc = xenstore_poll_watches(demu_state.xs_dev);
+                if (rc < 0) {
+                    DBG("lost connection to dom%d\n", demu_state.domid);
+                    return NULL;
+                }
+            }
         }
+
+        if (unused && i2c_params[0].desc)
+            break;
     }
 
-    sigfillset(&block);
+    return NULL;
+}
+
+int demu_i2c(unsigned long long *mem, unsigned long long *desc,
+	     unsigned long long *used, unsigned long long *avail,
+             unsigned long long *fd, int call, int kick)
+{
+    sigset_t        i2c;
+    int             rc;
+
+    i2c_params[0].call = call;
+    i2c_params[0].kick = kick;
+
+    sigfillset(&i2c);
 
     memset(&sigterm_handler, 0, sizeof (struct sigaction));
     sigterm_handler.sa_handler = demu_sigterm;
 
     sigaction(SIGTERM, &sigterm_handler, NULL);
-    sigdelset(&block, SIGTERM);
+    sigdelset(&i2c, SIGTERM);
 
     sigaction(SIGINT, &sigterm_handler, NULL);
-    sigdelset(&block, SIGINT);
+    sigdelset(&i2c, SIGINT);
 
     sigaction(SIGHUP, &sigterm_handler, NULL);
-    sigdelset(&block, SIGHUP);
+    sigdelset(&i2c, SIGHUP);
 
     sigaction(SIGABRT, &sigterm_handler, NULL);
-    sigdelset(&block, SIGABRT);
+    sigdelset(&i2c, SIGABRT);
 
-    sigprocmask(SIG_BLOCK, &block, NULL);
+    sigprocmask(SIG_BLOCK, &i2c, NULL);
 
-    demu_state.xs_dev = xenstore_create(XS_DISK_TYPE, devid_str);
+    demu_state.xs_dev = xenstore_create(XS_DEVICE_TYPE, NULL);
     if (demu_state.xs_dev == NULL) {
         fprintf(stderr, "failed to create xenstore instance\n");
         exit(1);
@@ -1052,34 +1046,15 @@ main(int argc, char **argv, char **envp)
         efd = xenevtchn_fd(demu_state.xeh);
         xfd = xenstore_get_fd(demu_state.xs_dev);
 
-        while (1) {
-            int nfds;
-            fd_set fds;
-            struct timeval t = { .tv_sec = 1 };
+        handle_guest_events(&xfd);
 
-            FD_ZERO(&fds);
-            FD_SET(efd, &fds);
-            FD_SET(xfd, &fds);
-            nfds = __max(efd, xfd) + 1;
-
-            rc = select(nfds, &fds, NULL, NULL, &t);
-            if (rc > 0) {
-                if (FD_ISSET(efd, &fds))
-                    demu_poll_iopages();
-
-                if (FD_ISSET(xfd, &fds)) {
-                    rc = xenstore_poll_watches(demu_state.xs_dev);
-                    if (rc < 0) {
-                        DBG("lost connection to dom%d\n", demu_state.domid);
-                        rc = 0;
-                        break;
-                    }
-                }
-            }
-
-            if (rc < 0 && errno != EINTR)
-                break;
-        }
+        pthread_create(&event_thread, NULL, handle_guest_events, NULL);
+        *mem = i2c_params[0].mem;
+        *desc = i2c_params[0].desc;
+        *used = i2c_params[0].used;
+        *avail= i2c_params[0].avail;
+        *fd = host_addr[0];
+        return 0;
 
         demu_teardown();
 

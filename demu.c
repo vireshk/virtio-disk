@@ -167,6 +167,7 @@ demu_map_guest_range(uint64_t addr, uint64_t size)
     if (ptr == NULL)
         goto fail2;
 
+    printf("%s: %d: %lx: %lx\n", __func__, __LINE__, ptr, addr);
     free(pfn);
 
     return ptr + (addr & ~TARGET_PAGE_MASK);

@@ -136,6 +136,7 @@ static void virtio_mmio_config_in(
 	struct virt_queue *vq;
 	u32 val = 0;
 
+	pr_info("%s: %d: %d\n", __func__, __LINE__, addr);
 	switch (addr) {
 	case VIRTIO_MMIO_MAGIC_VALUE:
 	case VIRTIO_MMIO_VERSION:
@@ -174,6 +175,7 @@ static void virtio_mmio_config_out(
 	struct kvm *kvm = vmmio->kvm;
 	u32 val = 0;
 
+	pr_info("%s: %d: %d\n", __func__, __LINE__, addr);
 	switch (addr) {
 	case VIRTIO_MMIO_HOST_FEATURES_SEL:
 	case VIRTIO_MMIO_GUEST_FEATURES_SEL:
